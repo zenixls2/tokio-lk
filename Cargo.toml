@@ -3,6 +3,11 @@ name = "tokio-lk"
 version = "0.1.0"
 authors = ["zenix <zenixls2@gmail.com>"]
 edition = "2018"
+readme = "README.md"
+repository = "https://github.com/zenixls2/tokio-lk"
+description = "Futures-aware lock-by-id primitives"
+categories = ["asynchronous"]
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,3 +18,6 @@ lazy_static = "1.4.0"
 
 [dev-dependencies]
 crossbeam = "0.7.3"
+
+[badges]
+circle-ci = { repository = "zenixls2/tokio-lk" }
