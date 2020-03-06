@@ -97,7 +97,7 @@ fn test_future_new_multiple() {
     let map = Arc::new(RwLock::new(HashMap::new()));
     let now = Instant::now();
     let task1 = Lock::fnew(1, map.clone())
-        .and_then(|lock| Ok(lock))
+        .and_then(|lock| lock)
         .and_then(|guard| {
             Delay::new(Instant::now() + Duration::from_millis(100))
                 .map_err(|_| ())
@@ -105,7 +105,7 @@ fn test_future_new_multiple() {
         })
         .and_then(|_| Ok(()));
     let task2 = Lock::fnew(1, map.clone())
-        .and_then(|lock| Ok(lock))
+        .and_then(|lock| lock)
         .and_then(|guard| {
             Delay::new(Instant::now() + Duration::from_millis(100))
                 .map_err(|_| ())
@@ -113,7 +113,7 @@ fn test_future_new_multiple() {
         })
         .and_then(|_| Ok(()));
     let task3 = Lock::fnew(2, map.clone())
-        .and_then(|lock| Ok(lock))
+        .and_then(|lock| lock)
         .and_then(|guard| {
             Delay::new(Instant::now() + Duration::from_millis(100))
                 .map_err(|_| ())
@@ -121,6 +121,6 @@ fn test_future_new_multiple() {
         })
         .and_then(|_| Ok(()));
     rt.block_on(task1.join3(task2, task3)).unwrap();
-    assert!(now.elapsed() <= Duration::from_millis(200));
-    assert!(now.elapsed() >= Duration::from_millis(100));
+    assert!(now.elapsed() >= Duration::from_millis(200));
+    assert!(now.elapsed() <= Duration::from_millis(300));
 }
