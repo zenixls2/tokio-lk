@@ -45,17 +45,17 @@ fn test_poll() {
     let map = Arc::new(RwLock::new(HashMap::new()));
     let mut lock = Lock::new(1, map.clone());
     let map2 = map.clone();
-    let _guard = lock.poll().unwrap();
     let task = Ok(())
         .into_future()
         .map_err(|()| ())
         .and_then(move |_| {
+            let guard = lock.poll().unwrap();
             let mut lock2 = Lock::new(1, map2.clone());
             assert!(lock2.poll().unwrap().is_not_ready());
-            Ok(())
+            Ok(guard)
         })
         .map_err(|()| unreachable!());
-    rt.block_on(task).unwrap();
+    let _guard = rt.block_on(task).unwrap();
     let value = map.read().unwrap().get(&1).unwrap().clone();
     assert!(value.0.load_consume() > 0);
     assert_eq!(value.1.load_consume(), 1);

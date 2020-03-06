@@ -1,7 +1,6 @@
 [![Build Status](https://circleci.com/gh/zenixls2/tokio-lk/tree/master.svg?style=shield)](https://circleci.com/gh/zenixls2/tokio-lk/cargo-readme/tree/master)
 
-# tokio-lk
-version - 0.1.0
+# tokio-lk version - 0.1.0
 
 ## Tokio-lk
 
@@ -15,7 +14,7 @@ Each `Lock` object is assigned an **unique** id.
 The uniqueness is promised until USIZE_MAX of id gets generated.
 Make sure old Locks are dropped before you generate new Locks above this amount.
 
-Example:
+### Example:
 ```rust
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -57,6 +56,16 @@ let task3 = Lock::fnew(2, map.clone())
     .and_then(|_| Ok(()));
 rt.block_on(task1.join3(task2, task3)).unwrap();
 ```
+
+### Benchmark
+to run the benchmark, execute the following command in the prompt:
+```bash
+cargo bench -- --nocapture
+```
+The `lock1000_parallel` benchmark is to run 1000 futures locked by a single lock to update the
+counter.
+The `lock1000_serial` benchmark is to run run similar operations in a single thread.
+Currently our implementation is about 8 times slower than the single threaded version.
 
 ### License
 

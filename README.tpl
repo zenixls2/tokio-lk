@@ -1,7 +1,6 @@
 {{badges}}
 
-# {{crate}}
-version - {{version}}
+# {{crate}} version - {{version}}
 
 {{readme}}
 

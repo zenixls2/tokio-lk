@@ -10,7 +10,7 @@
 //! The uniqueness is promised until USIZE_MAX of id gets generated.
 //! Make sure old Locks are dropped before you generate new Locks above this amount.
 //!
-//! Example:
+//! ## Example:
 //! ```rust,no_run
 //! use std::collections::HashMap;
 //! use std::sync::{Arc, RwLock};
@@ -52,22 +52,34 @@
 //!     .and_then(|_| Ok(()));
 //! rt.block_on(task1.join3(task2, task3)).unwrap();
 //! ```
+//!
+//! ## Benchmark
+//! to run the benchmark, execute the following command in the prompt:
+//! ```bash
+//! cargo bench -- --nocapture
+//! ```
+//! The `lock1000_parallel` benchmark is to run 1000 futures locked by a single lock to update the
+//! counter.
+//! The `lock1000_serial` benchmark is to run run similar operations in a single thread.
+//! Currently our implementation is about 8 times slower than the single threaded version.
 #![feature(test)]
 
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 use std::sync::{Arc, RwLock};
-use tokio::prelude::{task::AtomicTask, *};
+use tokio::prelude::*;
+mod atomic_serial_waker;
+use atomic_serial_waker::AtomicSerialWaker;
 #[cfg(test)]
 mod test;
 
 /// the map type used to store lock keys
-pub type MapType = Arc<RwLock<HashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicTask)>>>>;
+pub type MapType = Arc<RwLock<HashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>>>;
 
 lazy_static! {
     static ref ID: AtomicUsize = AtomicUsize::new(1);
-    static ref TASK: AtomicTask = AtomicTask::new();
+    static ref TASK: AtomicSerialWaker = AtomicSerialWaker::new();
 }
 
 #[inline]
@@ -85,7 +97,7 @@ fn get_id() -> usize {
 #[derive(Debug)]
 pub struct Lock {
     target: usize,
-    value: Arc<(AtomicUsize, AtomicUsize, AtomicTask)>,
+    value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
     map: MapType,
     id: usize,
     has_guard: bool,
@@ -97,7 +109,7 @@ struct AsyncInsert {
 }
 
 impl Future for AsyncInsert {
-    type Item = Arc<(AtomicUsize, AtomicUsize, AtomicTask)>;
+    type Item = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>;
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         match self.map.try_write() {
@@ -108,7 +120,7 @@ impl Future for AsyncInsert {
                         e.1.fetch_add(1, Relaxed);
                     })
                     .or_insert_with(|| {
-                        Arc::new((AtomicUsize::new(0), AtomicUsize::new(0), AtomicTask::new()))
+                        Arc::new((AtomicUsize::new(0), AtomicUsize::new(0), AtomicSerialWaker::new()))
                     })
                     .clone();
                 Ok(Async::Ready(value))
@@ -135,11 +147,11 @@ impl Lock {
                 e.1.fetch_add(1, Relaxed);
             })
             .or_insert_with(|| {
-                Arc::new((AtomicUsize::new(0), AtomicUsize::new(1), AtomicTask::new()))
+                Arc::new((AtomicUsize::new(0), AtomicUsize::new(1), AtomicSerialWaker::new()))
             })
             .clone();
         drop(wmap);
-        TASK.notify();
+        TASK.wake();
         Self {
             target,
             value,
@@ -153,7 +165,7 @@ impl Lock {
         let map2 = map.clone();
         let task = AsyncInsert { target, map };
         task.and_then(move |value| {
-            TASK.notify();
+            TASK.wake();
             Ok(Self {
                 target,
                 value,
@@ -182,23 +194,24 @@ impl Future for Lock {
     type Item = Guard;
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.value.2.register();
         if let Err(prev) = self
             .value
             .0
             .compare_exchange_weak(0, self.id, SeqCst, SeqCst)
         {
             if prev == self.id {
-                self.has_guard = true;
+                self.value.2.wake();
                 return Ok(Async::Ready(Guard::new(
                     self.target,
                     self.value.clone(),
                     self.map.clone(),
                 )));
             }
-            self.value.2.register();
             return Ok(Async::NotReady);
         }
         self.has_guard = true;
+        self.value.2.wake();
         Ok(Async::Ready(Guard::new(
             self.target,
             self.value.clone(),
@@ -213,14 +226,14 @@ impl Future for Lock {
 #[derive(Debug)]
 pub struct Guard {
     target: usize,
-    value: Arc<(AtomicUsize, AtomicUsize, AtomicTask)>,
+    value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
     map: MapType,
 }
 
 impl Guard {
     pub fn new(
         target: usize,
-        value: Arc<(AtomicUsize, AtomicUsize, AtomicTask)>,
+        value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
         map: MapType,
     ) -> Self {
         Self { target, value, map }
@@ -233,9 +246,9 @@ unsafe impl Sync for Guard {}
 impl Drop for Guard {
     fn drop(&mut self) {
         self.value.0.swap(0, Relaxed);
-        self.value.2.notify();
+        self.value.2.wake();
         let mut map = self.map.write().unwrap();
-        if self.value.1.fetch_sub(1, Relaxed) == 1 {
+        if self.value.1.fetch_sub(1, AcqRel) == 1 {
             map.remove(&self.target);
         }
         drop(map);
