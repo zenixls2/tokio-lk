@@ -19,3 +19,4 @@ crossbeam = "0.7.3"
 
 [badges]
 circle-ci = { repository = "zenixls2/tokio-lk" }
+travis-ci = { repository = "zenixls2/tokio-lk" }
