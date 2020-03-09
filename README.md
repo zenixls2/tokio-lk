@@ -1,4 +1,3 @@
-[![Build Status](https://circleci.com/gh/zenixls2/tokio-lk/tree/master.svg?style=shield)](https://circleci.com/gh/zenixls2/tokio-lk/cargo-readme/tree/master)
 [![Build Status](https://travis-ci.org/zenixls2/tokio-lk.svg?branch=master)](https://travis-ci.org/zenixls2/tokio-lk)
 
 # tokio-lk version - 0.1.0
