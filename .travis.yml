@@ -1,8 +1,6 @@
 language: rust
 rust:
   - nightly
-  - stable
-  - beta
 jobs:
   allow_failures:
     - rust: nightly
