@@ -1,3 +1,4 @@
+[![Crates.io](https://img.shields.io/crates/v/tokio-lk.svg)](https://crates.io/crates/tokio-lk)
 {{badges}}
 
 # {{crate}} version - {{version}}
