@@ -1,7 +1,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tokio-lk.svg)](https://crates.io/crates/tokio-lk)
 [![Build Status](https://travis-ci.org/zenixls2/tokio-lk.svg?branch=master)](https://travis-ci.org/zenixls2/tokio-lk)
 
-# tokio-lk version - 0.1.0
+# tokio-lk version - 0.1.1
 
 ## Tokio-lk
 

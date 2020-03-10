@@ -1,12 +1,12 @@
 [package]
 name = "tokio-lk"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["zenix <zenixls2@gmail.com>"]
 edition = "2018"
 readme = "README.md"
 repository = "https://github.com/zenixls2/tokio-lk"
 homepage = "https://github.com/zenixls2/tokio-lk"
-documentation = "https://doc.rs/tokio-lk/0.1.0"
+documentation = "https://docs.rs/tokio-lk/0.1.1"
 description = "Futures-aware lock-by-id primitives"
 keywords = ["futures", "async", "future", "tokio", "mutex"]
 categories = ["asynchronous"]
