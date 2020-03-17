@@ -7,11 +7,11 @@ use tokio::timer::Delay;
 
 #[test]
 fn test_drop() {
-    let map = Arc::new(RwLock::new(HashMap::new()));
+    let map = Arc::new(DashMap::new());
     let lock1 = Lock::new(1, map.clone());
     let lock2 = Lock::new(1, map.clone());
-    assert_eq!(map.read().unwrap().get(&1).is_some(), true);
-    match map.read().unwrap().get(&1) {
+    assert_eq!(map.get(&1).is_some(), true);
+    match map.get(&1) {
         Some(v) => {
             assert_eq!(v.0.load_consume(), 0);
             assert_eq!(v.1.load_consume(), 2);
@@ -20,13 +20,13 @@ fn test_drop() {
     }
     drop(lock1);
     drop(lock2);
-    assert_eq!(map.read().unwrap().len(), 0);
+    assert_eq!(map.len(), 0);
 }
 
 #[test]
 fn test_future_drop() {
     let mut rt = Runtime::new().unwrap();
-    let map = Arc::new(RwLock::new(HashMap::new()));
+    let map = Arc::new(DashMap::new());
     let lock = Lock::new(1, map.clone());
     let c = Arc::new(AtomicUsize::new(0));
     let cc = c.clone();
@@ -36,13 +36,13 @@ fn test_future_drop() {
     });
     rt.block_on(task).unwrap();
     assert_eq!(c.load_consume(), 1);
-    assert_eq!(map.read().unwrap().len(), 0);
+    assert_eq!(map.len(), 0);
 }
 
 #[test]
 fn test_poll() {
     let mut rt = Runtime::new().unwrap();
-    let map = Arc::new(RwLock::new(HashMap::new()));
+    let map = Arc::new(DashMap::new());
     let mut lock = Lock::new(1, map.clone());
     let map2 = map.clone();
     let task = Ok(())
@@ -56,7 +56,7 @@ fn test_poll() {
         })
         .map_err(|()| unreachable!());
     let _guard = rt.block_on(task).unwrap();
-    let value = map.read().unwrap().get(&1).unwrap().clone();
+    let value = map.get(&1).unwrap().clone();
     assert!(value.0.load_consume() > 0);
     assert_eq!(value.1.load_consume(), 1);
 }
@@ -64,7 +64,7 @@ fn test_poll() {
 #[test]
 fn test_future_multiple() {
     let mut rt = Runtime::new().unwrap();
-    let map = Arc::new(RwLock::new(HashMap::new()));
+    let map = Arc::new(DashMap::new());
     let map2 = map.clone();
     let now = Instant::now();
     let now2 = now.clone();
@@ -94,7 +94,7 @@ fn test_future_multiple() {
 #[test]
 fn test_future_new_multiple() {
     let mut rt = Runtime::new().unwrap();
-    let map = Arc::new(RwLock::new(HashMap::new()));
+    let map = Arc::new(DashMap::new());
     let now = Instant::now();
     let task1 = Lock::fnew(1, map.clone())
         .and_then(|lock| lock)

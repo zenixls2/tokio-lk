@@ -21,6 +21,12 @@ pub struct AtomicSerialWaker {
     waiting: AtomicUsize,
 }
 
+impl Default for AtomicSerialWaker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AtomicSerialWaker {
     pub fn new() -> Self {
         trait AssertSync: Sync {}

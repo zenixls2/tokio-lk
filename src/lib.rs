@@ -10,10 +10,14 @@
 //! The uniqueness is promised until USIZE_MAX of id gets generated.
 //! Make sure old Locks are dropped before you generate new Locks above this amount.
 //!
+//! ## Changelog
+//! - 0.1.3 - now depends on [dashmap](https://crates.io/crates/dashmap) to replace `RwLock<HashMap>`
+//! - 0.1.2 - first stable version
+//!
 //! ## Example:
 //! ```rust,no_run
-//! use std::collections::HashMap;
-//! use std::sync::{Arc, RwLock};
+//! use dashmap::DashMap;
+//! use std::sync::Arc;
 //! use std::time::{Duration, Instant};
 //! use tokio_lk::*;
 //! use tokio::prelude::*;
@@ -21,7 +25,7 @@
 //! use tokio::timer::Delay;
 //!
 //! let mut rt = Runtime::new().unwrap();
-//! let map = Arc::new(RwLock::new(HashMap::new()));
+//! let map = Arc::new(DashMap::new());
 //! let now = Instant::now();
 //! // this task will compete with task2 for lock at id 1
 //! let task1 = Lock::fnew(1, map.clone())
@@ -61,13 +65,13 @@
 //! The `lock1000_parallel` benchmark is to run 1000 futures locked by a single lock to update the
 //! counter.
 //! The `lock1000_serial` benchmark is to run run similar operations in a single thread.
-//! Currently our implementation is about 8 times slower than the single threaded version.
+//! Currently our implementation is about 6 times slower than the single threaded version.
 #![feature(test)]
 
+use dashmap::DashMap;
 use lazy_static::lazy_static;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering::*};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::prelude::*;
 mod atomic_serial_waker;
 use atomic_serial_waker::AtomicSerialWaker;
@@ -75,7 +79,7 @@ use atomic_serial_waker::AtomicSerialWaker;
 mod test;
 
 /// the map type used to store lock keys
-pub type MapType = Arc<RwLock<HashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>>>;
+pub type MapType = Arc<DashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>>;
 
 lazy_static! {
     static ref ID: AtomicUsize = AtomicUsize::new(1);
@@ -112,24 +116,21 @@ impl Future for AsyncInsert {
     type Item = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>;
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.map.try_write() {
-            Ok(mut wmap) => {
-                let value = wmap
-                    .entry(self.target)
-                    .and_modify(|e| {
-                        e.1.fetch_add(1, Relaxed);
-                    })
-                    .or_insert_with(|| {
-                        Arc::new((AtomicUsize::new(0), AtomicUsize::new(0), AtomicSerialWaker::new()))
-                    })
-                    .clone();
-                Ok(Async::Ready(value))
-            }
-            Err(_) => {
-                TASK.register();
-                Ok(Async::NotReady)
-            }
-        }
+        let value = self
+            .map
+            .entry(self.target)
+            .and_modify(|e| {
+                e.1.fetch_add(1, Relaxed);
+            })
+            .or_insert_with(|| {
+                Arc::new((
+                    AtomicUsize::new(0),
+                    AtomicUsize::new(0),
+                    AtomicSerialWaker::new(),
+                ))
+            })
+            .clone();
+        Ok(Async::Ready(value))
     }
 }
 
@@ -140,17 +141,19 @@ impl Lock {
     /// please refer to `fnew` function to provide asynchrons `Lock` instance generation
     pub fn new(target: usize, map: MapType) -> Self {
         let id = get_id();
-        let mut wmap = map.write().unwrap();
-        let value = wmap
+        let value = map
             .entry(target)
             .and_modify(|e| {
                 e.1.fetch_add(1, Relaxed);
             })
             .or_insert_with(|| {
-                Arc::new((AtomicUsize::new(0), AtomicUsize::new(1), AtomicSerialWaker::new()))
+                Arc::new((
+                    AtomicUsize::new(0),
+                    AtomicUsize::new(1),
+                    AtomicSerialWaker::new(),
+                ))
             })
             .clone();
-        drop(wmap);
         TASK.wake();
         Self {
             target,
@@ -247,22 +250,16 @@ impl Drop for Guard {
     fn drop(&mut self) {
         self.value.0.swap(0, Relaxed);
         self.value.2.wake();
-        let mut map = self.map.write().unwrap();
         if self.value.1.fetch_sub(1, AcqRel) == 1 {
-            map.remove(&self.target);
+            self.map.remove(&self.target);
         }
-        drop(map);
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        if !self.has_guard {
-            let mut map = self.map.write().unwrap();
-            if self.value.1.fetch_sub(1, Relaxed) == 1 {
-                map.remove(&self.target);
-            }
-            drop(map);
+        if !self.has_guard && self.value.1.fetch_sub(1, Relaxed) == 1 {
+            self.map.remove(&self.target);
         }
     }
 }
