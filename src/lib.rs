@@ -11,6 +11,7 @@
 //! Make sure old Locks are dropped before you generate new Locks above this amount.
 //!
 //! ## Changelog
+//! - 0.2.0 - bump to futures 0.3 and tokio 0.2
 //! - 0.1.3 - now depends on [dashmap](https://crates.io/crates/dashmap) to replace `RwLock<HashMap>`
 //! - 0.1.2 - first stable version
 //!
@@ -20,41 +21,29 @@
 //! use std::sync::Arc;
 //! use std::time::{Duration, Instant};
 //! use tokio_lk::*;
-//! use tokio::prelude::*;
+//! use futures::prelude::*;
 //! use tokio::runtime::Runtime;
-//! use tokio::timer::Delay;
+//! use tokio::time::delay_for;
 //!
 //! let mut rt = Runtime::new().unwrap();
 //! let map = Arc::new(DashMap::new());
 //! let now = Instant::now();
 //! // this task will compete with task2 for lock at id 1
-//! let task1 = Lock::fnew(1, map.clone())
-//!     .and_then(|lock| Ok(lock))
-//!     .and_then(|guard| {
-//!         Delay::new(Instant::now() + Duration::from_millis(100))
-//!             .map_err(|_| ())
-//!             .map(move |_| guard)
-//!     })
-//!     .and_then(|_| Ok(()));
+//! let task1 = async {
+//!     let _guard = Lock::fnew(1, map.clone()).await.await;
+//!     delay_for(Duration::from_millis(100)).await;
+//! };
 //! // this task will compete with task1 for lock at id 1
-//! let task2 = Lock::fnew(1, map.clone())
-//!     .and_then(|lock| Ok(lock))
-//!     .and_then(|guard| {
-//!         Delay::new(Instant::now() + Duration::from_millis(100))
-//!             .map_err(|_| ())
-//!             .map(move |_| guard)
-//!     })
-//!     .and_then(|_| Ok(()));
+//! let task2 = async {
+//!     let _guard = Lock::fnew(1, map.clone()).await.await;
+//!     delay_for(Duration::from_millis(100)).await;
+//! };
 //! // no other task compete for lock at id 2
-//! let task3 = Lock::fnew(2, map.clone())
-//!     .and_then(|lock| Ok(lock))
-//!     .and_then(|guard| {
-//!         Delay::new(Instant::now() + Duration::from_millis(100))
-//!             .map_err(|_| ())
-//!             .map(move |_| guard)
-//!     })
-//!     .and_then(|_| Ok(()));
-//! rt.block_on(task1.join3(task2, task3)).unwrap();
+//! let task3 = async {
+//!     let _guard = Lock::fnew(2, map.clone()).await.await;
+//!     delay_for(Duration::from_millis(100)).await;
+//! };
+//! rt.block_on(async { tokio::join!(task1, task2, task3) });
 //! ```
 //!
 //! ## Benchmark
@@ -65,14 +54,16 @@
 //! The `lock1000_parallel` benchmark is to run 1000 futures locked by a single lock to update the
 //! counter.
 //! The `lock1000_serial` benchmark is to run run similar operations in a single thread.
-//! Currently our implementation is about 6 times slower than the single threaded version.
+//! Currently our implementation is about 4~5 times slower than the single threaded version.
 #![feature(test)]
 
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 use std::sync::Arc;
-use tokio::prelude::*;
+use std::pin::Pin;
+use futures::prelude::*;
+use std::task::{Context, Poll};
 mod atomic_serial_waker;
 use atomic_serial_waker::AtomicSerialWaker;
 #[cfg(test)]
@@ -113,12 +104,13 @@ struct AsyncInsert {
 }
 
 impl Future for AsyncInsert {
-    type Item = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>;
-    type Error = ();
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let value = self
+    type Output = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>;
+    #[inline]
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
+        let pinned = Pin::get_mut(self);
+        let value = pinned
             .map
-            .entry(self.target)
+            .entry(pinned.target)
             .and_modify(|e| {
                 e.1.fetch_add(1, Relaxed);
             })
@@ -130,7 +122,7 @@ impl Future for AsyncInsert {
                 ))
             })
             .clone();
-        Ok(Async::Ready(value))
+        Poll::Ready(value)
     }
 }
 
@@ -139,6 +131,7 @@ impl Lock {
     /// This operation might block threads from parking for a while
     /// Don't use this function inside tokio context
     /// please refer to `fnew` function to provide asynchrons `Lock` instance generation
+    #[inline]
     pub fn new(target: usize, map: MapType) -> Self {
         let id = get_id();
         let value = map
@@ -164,23 +157,23 @@ impl Lock {
         }
     }
     /// Create a Lock instance on the future's result
-    pub fn fnew(target: usize, map: MapType) -> impl Future<Item = Self, Error = ()> {
+    #[inline]
+    pub async fn fnew(target: usize, map: MapType) -> Self {
         let map2 = map.clone();
-        let task = AsyncInsert { target, map };
-        task.and_then(move |value| {
-            TASK.wake();
-            Ok(Self {
-                target,
-                value,
-                map: map2,
-                id: get_id(),
-                has_guard: false,
-            })
-        })
+        let value = AsyncInsert { target, map }.await;
+        TASK.wake();
+        Self {
+            target,
+            value,
+            map: map2,
+            id: get_id(),
+            has_guard: false,
+        }
     }
 }
 
 impl Clone for Lock {
+    #[inline]
     fn clone(&self) -> Self {
         self.value.1.fetch_add(1, Relaxed);
         Self {
@@ -194,32 +187,33 @@ impl Clone for Lock {
 }
 
 impl Future for Lock {
-    type Item = Guard;
-    type Error = ();
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.value.2.register();
-        if let Err(prev) = self
+    type Output = Guard;
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let pinned = Pin::get_mut(self);
+        pinned.value.2.register(cx.waker());
+        if let Err(prev) = pinned
             .value
             .0
-            .compare_exchange_weak(0, self.id, SeqCst, SeqCst)
+            .compare_exchange_weak(0, pinned.id, SeqCst, SeqCst)
         {
-            if prev == self.id {
-                self.value.2.wake();
-                return Ok(Async::Ready(Guard::new(
-                    self.target,
-                    self.value.clone(),
-                    self.map.clone(),
-                )));
+            if prev == pinned.id {
+                pinned.value.2.wake();
+                return Poll::Ready(Guard::new(
+                    pinned.target,
+                    pinned.value.clone(),
+                    pinned.map.clone(),
+                ));
             }
-            return Ok(Async::NotReady);
+            return Poll::Pending;
         }
-        self.has_guard = true;
-        self.value.2.wake();
-        Ok(Async::Ready(Guard::new(
-            self.target,
-            self.value.clone(),
-            self.map.clone(),
-        )))
+        pinned.has_guard = true;
+        pinned.value.2.wake();
+        Poll::Ready(Guard::new(
+            pinned.target,
+            pinned.value.clone(),
+            pinned.map.clone(),
+        ))
     }
 }
 
@@ -234,6 +228,7 @@ pub struct Guard {
 }
 
 impl Guard {
+    #[inline]
     pub fn new(
         target: usize,
         value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
@@ -247,6 +242,7 @@ unsafe impl Send for Guard {}
 unsafe impl Sync for Guard {}
 
 impl Drop for Guard {
+    #[inline]
     fn drop(&mut self) {
         self.value.0.swap(0, Relaxed);
         self.value.2.wake();
@@ -257,6 +253,7 @@ impl Drop for Guard {
 }
 
 impl Drop for Lock {
+    #[inline]
     fn drop(&mut self) {
         if !self.has_guard && self.value.1.fetch_sub(1, Relaxed) == 1 {
             self.map.remove(&self.target);

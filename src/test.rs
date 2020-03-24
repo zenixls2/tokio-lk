@@ -3,7 +3,17 @@ use super::*;
 use crossbeam::atomic::AtomicConsume;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
-use tokio::timer::Delay;
+use tokio::time::delay_for;
+use std::pin::Pin;
+
+struct TestPoll(Lock);
+impl Future for TestPoll {
+    type Output = Poll<Guard>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let pinned = Pin::get_mut(self);
+        Poll::Ready(Pin::new(&mut pinned.0).poll(cx))
+    }
+}
 
 #[test]
 fn test_drop() {
@@ -30,11 +40,11 @@ fn test_future_drop() {
     let lock = Lock::new(1, map.clone());
     let c = Arc::new(AtomicUsize::new(0));
     let cc = c.clone();
-    let task = lock.and_then(move |_| {
+    let task = async move {
+        let _guard = lock.await;
         cc.store(1, Relaxed);
-        Ok(())
-    });
-    rt.block_on(task).unwrap();
+    };
+    rt.block_on(task);
     assert_eq!(c.load_consume(), 1);
     assert_eq!(map.len(), 0);
 }
@@ -43,19 +53,15 @@ fn test_future_drop() {
 fn test_poll() {
     let mut rt = Runtime::new().unwrap();
     let map = Arc::new(DashMap::new());
-    let mut lock = Lock::new(1, map.clone());
+    let lock = Lock::new(1, map.clone());
     let map2 = map.clone();
-    let task = Ok(())
-        .into_future()
-        .map_err(|()| ())
-        .and_then(move |_| {
-            let guard = lock.poll().unwrap();
-            let mut lock2 = Lock::new(1, map2.clone());
-            assert!(lock2.poll().unwrap().is_not_ready());
-            Ok(guard)
-        })
-        .map_err(|()| unreachable!());
-    let _guard = rt.block_on(task).unwrap();
+    let task = async move {
+        let guard = lock.await;
+        let lock2 = TestPoll(Lock::new(1, map2.clone()));
+        assert!(lock2.await.is_pending());
+        guard
+    };
+    let _guard = rt.block_on(task);
     let value = map.get(&1).unwrap().clone();
     assert!(value.0.load_consume() > 0);
     assert_eq!(value.1.load_consume(), 1);
@@ -67,28 +73,20 @@ fn test_future_multiple() {
     let map = Arc::new(DashMap::new());
     let map2 = map.clone();
     let now = Instant::now();
-    let now2 = now.clone();
-    let task1 = Ok(())
-        .into_future()
-        .and_then(move |_| {
-            let lock = Lock::new(2, map2.clone());
-            lock.and_then(move |guard| {
-                Delay::new(now2 + Duration::from_millis(300))
-                    .map_err(|_| ())
-                    .map(move |_| guard)
-            })
-        })
-        .and_then(|_| Ok(()));
-    let task2 = Delay::new(now.clone() + Duration::from_millis(100))
-        .map_err(|_| ())
-        .and_then(move |_| {
-            let lock = Lock::new(2, map);
-            lock.and_then(move |_guard| {
-                assert!(now.elapsed() >= Duration::from_millis(300));
-                Ok(())
-            })
-        });
-    rt.block_on(task1.join(task2)).unwrap();
+    let task1 = async {
+        let lock = Lock::new(2, map2.clone());
+        let _guard = lock.await;
+        delay_for(Duration::from_millis(300)).await;
+    };
+    let task2 = async move {
+        delay_for(Duration::from_millis(100)).await;
+        let lock = Lock::new(2, map);
+        let _guard = lock.await;
+        assert!(now.elapsed() >= Duration::from_millis(300));
+    };
+    rt.block_on(async {
+        tokio::join!(task1, task2)
+    });
 }
 
 #[test]
@@ -96,31 +94,21 @@ fn test_future_new_multiple() {
     let mut rt = Runtime::new().unwrap();
     let map = Arc::new(DashMap::new());
     let now = Instant::now();
-    let task1 = Lock::fnew(1, map.clone())
-        .and_then(|lock| lock)
-        .and_then(|guard| {
-            Delay::new(Instant::now() + Duration::from_millis(100))
-                .map_err(|_| ())
-                .map(move |_| guard)
-        })
-        .and_then(|_| Ok(()));
-    let task2 = Lock::fnew(1, map.clone())
-        .and_then(|lock| lock)
-        .and_then(|guard| {
-            Delay::new(Instant::now() + Duration::from_millis(100))
-                .map_err(|_| ())
-                .map(move |_| guard)
-        })
-        .and_then(|_| Ok(()));
-    let task3 = Lock::fnew(2, map.clone())
-        .and_then(|lock| lock)
-        .and_then(|guard| {
-            Delay::new(Instant::now() + Duration::from_millis(100))
-                .map_err(|_| ())
-                .map(move |_| guard)
-        })
-        .and_then(|_| Ok(()));
-    rt.block_on(task1.join3(task2, task3)).unwrap();
+    let task1 = async {
+        let _guard = Lock::fnew(1, map.clone()).await.await;
+        delay_for(Duration::from_millis(100)).await;
+    };
+    let task2 = async {
+        let _guard = Lock::fnew(1, map.clone()).await.await;
+        delay_for(Duration::from_millis(100)).await;
+    };
+    let task3 = async {
+        let _guard = Lock::fnew(2, map.clone()).await.await;
+        delay_for(Duration::from_millis(100)).await;
+    };
+    rt.block_on(async {
+        tokio::join!(task1, task2, task3)
+    });
     assert!(now.elapsed() >= Duration::from_millis(200));
     assert!(now.elapsed() <= Duration::from_millis(300));
 }

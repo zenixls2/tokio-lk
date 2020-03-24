@@ -1,7 +1,7 @@
 use core::fmt;
+use core::task::Waker;
 use crossbeam::atomic::AtomicConsume;
 use crossbeam::queue::{ArrayQueue, PushError};
-use futures::task::{current, Task};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[inline]
@@ -17,7 +17,7 @@ pub fn positive_update(a: &AtomicUsize) -> bool {
 }
 
 pub struct AtomicSerialWaker {
-    waker: ArrayQueue<Task>,
+    waker: ArrayQueue<Waker>,
     waiting: AtomicUsize,
 }
 
@@ -30,18 +30,18 @@ impl Default for AtomicSerialWaker {
 impl AtomicSerialWaker {
     pub fn new() -> Self {
         trait AssertSync: Sync {}
-        impl AssertSync for Task {}
+        impl AssertSync for Waker {}
         Self {
             waker: ArrayQueue::new(4),
             waiting: AtomicUsize::new(0),
         }
     }
     #[inline]
-    pub fn register(&self) {
-        match self.waker.push(current()) {
+    pub fn register(&self, waker: &Waker) {
+        match self.waker.push(waker.clone()) {
             Ok(()) => self.wk(),
             Err(PushError(w)) => {
-                w.notify();
+                w.wake_by_ref();
             }
         }
     }
@@ -49,12 +49,12 @@ impl AtomicSerialWaker {
     fn wk(&self) {
         if let Ok(task) = self.waker.pop() {
             if positive_update(&self.waiting) {
-                task.notify();
+                task.wake();
             } else {
                 match self.waker.push(task) {
                     Ok(()) => {}
                     Err(PushError(w)) => {
-                        w.notify();
+                        w.wake_by_ref();
                     }
                 }
             }
@@ -65,7 +65,7 @@ impl AtomicSerialWaker {
     pub fn wake(&self) {
         let task = self.waker.pop();
         if let Ok(task) = task {
-            task.notify();
+            task.wake();
         } else {
             self.waiting.fetch_add(1, Ordering::Release);
         }
