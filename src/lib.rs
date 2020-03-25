@@ -11,14 +11,13 @@
 //! Make sure old Locks are dropped before you generate new Locks above this amount.
 //!
 //! ## Changelog
+//! - 0.2.1 - add features for using either hashbrown or dashmap. add `KeyPool` for hashmap abstraction.
 //! - 0.2.0 - bump to futures 0.3 and tokio 0.2
 //! - 0.1.3 - now depends on [dashmap](https://crates.io/crates/dashmap) to replace `RwLock<HashMap>`
 //! - 0.1.2 - first stable version
 //!
 //! ## Example:
 //! ```rust,no_run
-//! use dashmap::DashMap;
-//! use std::sync::Arc;
 //! use std::time::{Duration, Instant};
 //! use tokio_lk::*;
 //! use futures::prelude::*;
@@ -26,7 +25,7 @@
 //! use tokio::time::delay_for;
 //!
 //! let mut rt = Runtime::new().unwrap();
-//! let map = Arc::new(DashMap::new());
+//! let map = KeyPool::<MapType>::new();
 //! let now = Instant::now();
 //! // this task will compete with task2 for lock at id 1
 //! let task1 = async {
@@ -46,6 +45,14 @@
 //! rt.block_on(async { tokio::join!(task1, task2, task3) });
 //! ```
 //!
+//! ## Features
+//! - hashbrown
+//!     * provides `MapType` as a type alias of `hashbrown::HashMap` for KeyPool initialization
+//! - dashmap
+//!     * provides `DashMapType` as a type alias of `dashmap::DashMap` for KeyPool initialization
+//! - default: hashbrown
+//! - all: both `hashbrown` and `dashmap`
+//!
 //! ## Benchmark
 //! to run the benchmark, execute the following command in the prompt:
 //! ```bash
@@ -55,22 +62,30 @@
 //! counter.
 //! The `lock1000_serial` benchmark is to run run similar operations in a single thread.
 //! Currently our implementation is about 4~5 times slower than the single threaded version.
-#![feature(test)]
+#![feature(test, specialization)]
 
+#[cfg(feature = "dashmap")]
 use dashmap::DashMap;
-use lazy_static::lazy_static;
-use std::sync::atomic::{AtomicUsize, Ordering::*};
-use std::sync::Arc;
-use std::pin::Pin;
 use futures::prelude::*;
+#[cfg(feature = "hashbrown")]
+use hashbrown::HashMap;
+use lazy_static::lazy_static;
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering::*};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 mod atomic_serial_waker;
 use atomic_serial_waker::AtomicSerialWaker;
+use std::fmt;
 #[cfg(test)]
 mod test;
 
 /// the map type used to store lock keys
-pub type MapType = Arc<DashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>>;
+#[cfg(feature = "hashbrown")]
+pub type MapType = Arc<Mutex<HashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>>>;
+#[cfg(feature = "dashmap")]
+pub type DashMapType = Arc<DashMap<usize, Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>>;
 
 lazy_static! {
     static ref ID: AtomicUsize = AtomicUsize::new(1);
@@ -87,23 +102,117 @@ fn get_id() -> usize {
     }
 }
 
+pub struct KeyPool<T> {
+    table: T,
+}
+
+pub trait NewKeyPool<T> {
+    fn new() -> Self;
+}
+
+#[cfg(feature = "hashbrown")]
+impl NewKeyPool<MapType> for KeyPool<MapType> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            table: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[cfg(feature = "dashmap")]
+impl NewKeyPool<DashMapType> for KeyPool<DashMapType> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            table: Arc::new(DashMap::new()),
+        }
+    }
+}
+
+impl<T: Clone> Clone for KeyPool<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            table: self.table.clone(),
+        }
+    }
+}
+
+impl<T> Deref for KeyPool<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.table
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for KeyPool<T> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.table.fmt(f)
+    }
+}
+
+impl<T> DerefMut for KeyPool<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.table
+    }
+}
+
 /// ### Lock future struct
 /// The lock future refers to shared map to support lock-by-id functionality
 #[derive(Debug)]
-pub struct Lock {
+pub struct Lock<T>
+where
+    Lock<T>: Destruct<T>,
+{
     target: usize,
     value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
-    map: MapType,
+    map: KeyPool<T>,
     id: usize,
     has_guard: bool,
 }
 
-struct AsyncInsert {
+pub struct AsyncInsert<T> {
     pub(crate) target: usize,
-    pub(crate) map: MapType,
+    pub(crate) map: KeyPool<T>,
 }
 
-impl Future for AsyncInsert {
+#[cfg(feature = "hashbrown")]
+impl Future for AsyncInsert<MapType> {
+    type Output = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>;
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let pinned = Pin::get_mut(self);
+        match pinned.map.try_lock() {
+            Ok(mut wmap) => {
+                let value = wmap
+                    .entry(pinned.target)
+                    .and_modify(|e| {
+                        e.1.fetch_add(1, Relaxed);
+                    })
+                    .or_insert_with(|| {
+                        Arc::new((
+                            AtomicUsize::new(0),
+                            AtomicUsize::new(0),
+                            AtomicSerialWaker::new(),
+                        ))
+                    })
+                    .clone();
+                Poll::Ready(value)
+            }
+            Err(_) => {
+                TASK.register(cx.waker());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+#[cfg(feature = "dashmap")]
+impl Future for AsyncInsert<DashMapType> {
     type Output = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>;
     #[inline]
     fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
@@ -126,13 +235,74 @@ impl Future for AsyncInsert {
     }
 }
 
-impl Lock {
+impl<T: Clone> Lock<T>
+where
+    Lock<T>: Destruct<T>,
+    AsyncInsert<T>: Future<Output = Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>>,
+{
+    /// Create a Lock instance on the future's result
+    #[inline]
+    pub async fn fnew(target: usize, map: KeyPool<T>) -> Self {
+        let map2 = map.clone();
+        let value = AsyncInsert { target, map }.await;
+        TASK.wake();
+        Self {
+            target,
+            value,
+            map: map2,
+            id: get_id(),
+            has_guard: false,
+        }
+    }
+}
+
+pub trait New<T: Clone>: Destruct<T> {
+    fn new(target: usize, map: KeyPool<T>) -> Self;
+}
+
+#[cfg(feature = "hashbrown")]
+impl New<MapType> for Lock<MapType> {
     /// Create a Lock instance.
     /// This operation might block threads from parking for a while
     /// Don't use this function inside tokio context
     /// please refer to `fnew` function to provide asynchrons `Lock` instance generation
     #[inline]
-    pub fn new(target: usize, map: MapType) -> Self {
+    fn new(target: usize, map: KeyPool<MapType>) -> Self {
+        let id = get_id();
+        let value = map
+            .lock()
+            .unwrap()
+            .entry(target)
+            .and_modify(|e| {
+                e.1.fetch_add(1, Relaxed);
+            })
+            .or_insert_with(|| {
+                Arc::new((
+                    AtomicUsize::new(0),
+                    AtomicUsize::new(1),
+                    AtomicSerialWaker::new(),
+                ))
+            })
+            .clone();
+        TASK.wake();
+        Self {
+            target,
+            value,
+            map,
+            id,
+            has_guard: false,
+        }
+    }
+}
+
+#[cfg(feature = "dashmap")]
+impl New<DashMapType> for Lock<DashMapType> {
+    /// Create a Lock instance.
+    /// This operation might block threads from parking for a while
+    /// Don't use this function inside tokio context
+    /// please refer to `fnew` function to provide asynchrons `Lock` instance generation
+    #[inline]
+    fn new(target: usize, map: KeyPool<DashMapType>) -> Self {
         let id = get_id();
         let value = map
             .entry(target)
@@ -156,23 +326,70 @@ impl Lock {
             has_guard: false,
         }
     }
-    /// Create a Lock instance on the future's result
+}
+
+pub trait Destruct<T> {
+    fn destruct(&mut self);
+}
+
+default impl<T> Destruct<T> for Lock<T> {
     #[inline]
-    pub async fn fnew(target: usize, map: MapType) -> Self {
-        let map2 = map.clone();
-        let value = AsyncInsert { target, map }.await;
-        TASK.wake();
-        Self {
-            target,
-            value,
-            map: map2,
-            id: get_id(),
-            has_guard: false,
+    fn destruct(&mut self) {}
+}
+
+#[cfg(feature = "hashbrown")]
+impl Destruct<MapType> for Lock<MapType> {
+    #[inline]
+    fn destruct(&mut self) {
+        if !self.has_guard && self.value.1.fetch_sub(1, Relaxed) == 1 {
+            self.map.lock().unwrap().remove(&self.target);
         }
     }
 }
 
-impl Clone for Lock {
+#[cfg(feature = "dashmap")]
+impl Destruct<DashMapType> for Lock<DashMapType> {
+    #[inline]
+    fn destruct(&mut self) {
+        if !self.has_guard && self.value.1.fetch_sub(1, Relaxed) == 1 {
+            self.map.remove(&self.target);
+        }
+    }
+}
+
+default impl<T> Destruct<T> for Guard<T> {
+    #[inline]
+    fn destruct(&mut self) {}
+}
+
+#[cfg(feature = "hashbrown")]
+impl Destruct<MapType> for Guard<MapType> {
+    #[inline]
+    fn destruct(&mut self) {
+        self.value.0.swap(0, Relaxed);
+        self.value.2.wake();
+        if self.value.1.fetch_sub(1, AcqRel) == 1 {
+            self.map.lock().unwrap().remove(&self.target);
+        }
+    }
+}
+
+#[cfg(feature = "dashmap")]
+impl Destruct<DashMapType> for Guard<DashMapType> {
+    #[inline]
+    fn destruct(&mut self) {
+        self.value.0.swap(0, Relaxed);
+        self.value.2.wake();
+        if self.value.1.fetch_sub(1, AcqRel) == 1 {
+            self.map.remove(&self.target);
+        }
+    }
+}
+
+impl<T: Clone> Clone for Lock<T>
+where
+    Lock<T>: Destruct<T>,
+{
     #[inline]
     fn clone(&self) -> Self {
         self.value.1.fetch_add(1, Relaxed);
@@ -186,8 +403,12 @@ impl Clone for Lock {
     }
 }
 
-impl Future for Lock {
-    type Output = Guard;
+impl<T: Clone + Unpin> Future for Lock<T>
+where
+    Lock<T>: Destruct<T>,
+    Guard<T>: Destruct<T>,
+{
+    type Output = Guard<T>;
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let pinned = Pin::get_mut(self);
@@ -221,42 +442,48 @@ impl Future for Lock {
 /// hold it, and then you hold the mutex.
 /// drop it, and you release the lock.
 #[derive(Debug)]
-pub struct Guard {
+pub struct Guard<T>
+where
+    Guard<T>: Destruct<T>,
+{
     target: usize,
     value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
-    map: MapType,
+    map: KeyPool<T>,
 }
 
-impl Guard {
+impl<T> Guard<T>
+where
+    Guard<T>: Destruct<T>,
+{
     #[inline]
     pub fn new(
         target: usize,
         value: Arc<(AtomicUsize, AtomicUsize, AtomicSerialWaker)>,
-        map: MapType,
+        map: KeyPool<T>,
     ) -> Self {
         Self { target, value, map }
     }
 }
 
-unsafe impl Send for Guard {}
-unsafe impl Sync for Guard {}
+unsafe impl<T> Send for Guard<T> where Guard<T>: Destruct<T> {}
+unsafe impl<T> Sync for Guard<T> where Guard<T>: Destruct<T> {}
 
-impl Drop for Guard {
+impl<T> Drop for Guard<T>
+where
+    Guard<T>: Destruct<T>,
+{
     #[inline]
     fn drop(&mut self) {
-        self.value.0.swap(0, Relaxed);
-        self.value.2.wake();
-        if self.value.1.fetch_sub(1, AcqRel) == 1 {
-            self.map.remove(&self.target);
-        }
+        self.destruct();
     }
 }
 
-impl Drop for Lock {
+impl<T> Drop for Lock<T>
+where
+    Lock<T>: Destruct<T>,
+{
     #[inline]
     fn drop(&mut self) {
-        if !self.has_guard && self.value.1.fetch_sub(1, Relaxed) == 1 {
-            self.map.remove(&self.target);
-        }
+        self.destruct();
     }
 }

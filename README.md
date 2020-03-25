@@ -2,7 +2,7 @@
 [![License](https://img.shields.io/crates/l/tokio-lk)](LICENSE-MIT)
 [![Build Status](https://travis-ci.org/zenixls2/tokio-lk.svg?branch=master)](https://travis-ci.org/zenixls2/tokio-lk)
 
-# tokio-lk version - 0.2.0
+# tokio-lk version - 0.2.1
 
 ## Tokio-lk
 
@@ -17,14 +17,13 @@ The uniqueness is promised until USIZE_MAX of id gets generated.
 Make sure old Locks are dropped before you generate new Locks above this amount.
 
 ### Changelog
+- 0.2.1 - add features for using either hashbrown or dashmap. add `KeyPool` for hashmap abstraction.
 - 0.2.0 - bump to futures 0.3 and tokio 0.2
 - 0.1.3 - now depends on [dashmap](https://crates.io/crates/dashmap) to replace `RwLock<HashMap>`
 - 0.1.2 - first stable version
 
 ### Example:
 ```rust
-use dashmap::DashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_lk::*;
 use futures::prelude::*;
@@ -32,7 +31,7 @@ use tokio::runtime::Runtime;
 use tokio::time::delay_for;
 
 let mut rt = Runtime::new().unwrap();
-let map = Arc::new(DashMap::new());
+let map = KeyPool::<MapType>::new();
 let now = Instant::now();
 // this task will compete with task2 for lock at id 1
 let task1 = async {
@@ -51,6 +50,14 @@ let task3 = async {
 };
 rt.block_on(async { tokio::join!(task1, task2, task3) });
 ```
+
+### Features
+- hashbrown
+    * provides `MapType` as a type alias of `hashbrown::HashMap` for KeyPool initialization
+- dashmap
+    * provides `DashMapType` as a type alias of `dashmap::DashMap` for KeyPool initialization
+- default: hashbrown
+- all: both `hashbrown` and `dashmap`
 
 ### Benchmark
 to run the benchmark, execute the following command in the prompt:
