@@ -1,6 +1,6 @@
 [package]
 name = "tokio-lk"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["zenix <zenixls2@gmail.com>"]
 edition = "2018"
 readme = "README.md"
@@ -36,5 +36,5 @@ hashbrown = { version = "0.7.1", features = ["nightly", "inline-more", "ahash", 
 [badges]
 travis-ci = { repository = "zenixls2/tokio-lk" }
 
-[package.metadata.doc.rs]
+[package.metadata.docs.rs]
 all-features = true

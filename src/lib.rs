@@ -11,6 +11,7 @@
 //! Make sure old Locks are dropped before you generate new Locks above this amount.
 //!
 //! ## Changelog
+//! - 0.2.2 - minor fix on cargo.toml to let docs.rs generate documentation of all features
 //! - 0.2.1 - add features for using either hashbrown or dashmap. add `KeyPool` for hashmap abstraction.
 //! - 0.2.0 - bump to futures 0.3 and tokio 0.2
 //! - 0.1.3 - now depends on [dashmap](https://crates.io/crates/dashmap) to replace `RwLock<HashMap>`
